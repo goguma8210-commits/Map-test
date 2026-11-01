@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>나침반 계수 실험</title>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<style>
+  :root { --bg:#0f1115; --panel:#181b22; --line:#2a2f3a; --text:#e8eaf0; --muted:#8a91a3; --k3:#ff6b6b; --k6:#ffd166; --k9:#4dabf7; --raw:#9aa3b5; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text); font-family:-apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+  body { display:flex; flex-direction:column; }
+  #map { flex:1; min-height:38vh; }
+  #panel { background:var(--panel); border-top:1px solid var(--line); padding:10px 12px calc(12px + env(safe-area-inset-bottom)); max-height:62vh; overflow-y:auto; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .status { font-size:13px; color:var(--muted); margin-bottom:8px; line-height:1.5; }
+  .status b { color:var(--text); }
+  .dials { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin:6px 0 10px; }
+  .dial { background:#11141a; border:1px solid var(--line); border-radius:12px; padding:8px 4px; text-align:center; }
+  .dial svg { width:100%; max-width:120px; height:auto; display:block; margin:0 auto; }
+  .dial .k { font-weight:700; font-size:15px; }
+  .dial .deg { font-size:13px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .dial .res { font-size:13px; margin-top:2px; font-variant-numeric:tabular-nums; min-height:18px; }
+  button { background:#232835; color:var(--text); border:1px solid var(--line); border-radius:10px; padding:9px 12px; font-size:14px; font-family:inherit; }
+  button.on { background:#2f3a52; border-color:#4dabf7; }
+  button:disabled { opacity:.5; }
+  h3 { font-size:14px; margin:12px 0 6px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; font-variant-numeric:tabular-nums; }
+  th, td { border-bottom:1px solid var(--line); padding:5px 4px; text-align:center; }
+  th { color:var(--muted); font-weight:500; }
+  .hint { font-size:12px; color:var(--muted); line-height:1.5; margin-top:8px; }
+  .tag { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+  <div class="status" id="status">내 위치를 찾는 중…</div>
+  <div class="row">
+    <button id="modeBtn">📍 내 위치: GPS</button>
+    <button id="jitterBtn">〰️ 떨림 측정 60초</button>
+    <button id="copyBtn">📋 기록 복사</button>
+  </div>
+  <div class="dials" id="dials"></div>
+
+  <h3>① 반응 속도 (목표를 바꾼 뒤 10° 이내로 따라잡기까지)</h3>
+  <table><thead><tr><th>#</th><th>꺾인 각도</th><th><span class="tag" style="background:var(--k3)"></span>0.3</th><th><span class="tag" style="background:var(--k6)"></span>0.6</th><th><span class="tag" style="background:var(--k9)"></span>0.9</th></tr></thead><tbody id="reactBody"></tbody></table>
+
+  <h3>② 떨림 (가만히 있을 때 60초 동안 흔들린 폭)</h3>
+  <table><thead><tr><th>#</th><th>GPS 원래값</th><th><span class="tag" style="background:var(--k3)"></span>0.3</th><th><span class="tag" style="background:var(--k6)"></span>0.6</th><th><span class="tag" style="background:var(--k9)"></span>0.9</th></tr></thead><tbody id="jitterBody"></tbody></table>
+
+  <p class="hint">
+    지도를 탭하면 목표가 바뀌어요. 계산은 MANHUNT와 같은 식(1초마다 갱신, 단위원 벡터 평균, 같은 GPS 필터)을 써요.<br>
+    반응 속도: 목표를 찍고 45초 이상 기다려 화살표가 완전히 자리 잡으면, 목표를 내 기준 90° 옆으로 옮겨 찍어요. 예측은 0.3 → 2초, 0.6 → 4초, 0.9 → 18초.<br>
+    떨림: 목표를 30m 이상 떨어진 곳에 찍고, 가만히 서서 측정 버튼을 눌러요. 실내에선 "내 위치: 직접 지정"으로 바꾸면 GPS 없이 반응 속도만 시험할 수 있어요.
+  </p>
+</div>
+
+<script>
+const D2R = Math.PI / 180;
+const KS = [0.3, 0.6, 0.9];
+const COLORS = ['var(--k3)', 'var(--k6)', 'var(--k9)'];
+const $ = s => document.querySelector(s);
+
+// ===== MANHUNT와 같은 계산 =====
+function dist(a, b) {
+  const p1 = a.lat * D2R, p2 = b.lat * D2R, dp = (b.lat - a.lat) * D2R, dl = (b.lng - a.lng) * D2R;
+  const h = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+function brg(a, b) {
+  const p1 = a.lat * D2R, p2 = b.lat * D2R, dl = (b.lng - a.lng) * D2R;
+  const y = Math.sin(dl) * Math.cos(p2), x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+  return (Math.atan2(y, x) / D2R + 360) % 360;
+}
+let kf = null;
+const RUN_MPS = 4;
+function filterFix(lng, lat, acc, ts) {
+  acc = Math.max(acc || 50, 3);
+  if (!kf) { kf = { lng, lat, v: acc * acc, t: ts, reject: 0 }; return { lng, lat, acc }; }
+  const dt = Math.max(0.2, (ts - kf.t) / 1000);
+  kf.v += dt * RUN_MPS * RUN_MPS;
+  const jump = dist({ lng, lat }, kf);
+  if (jump > 3 * Math.sqrt(kf.v + acc * acc) && jump > 30 && ++kf.reject < 3) return { lng: kf.lng, lat: kf.lat, acc: Math.sqrt(kf.v) };
+  kf.reject = 0;
+  const K = kf.v / (kf.v + acc * acc);
+  kf.lng += K * (lng - kf.lng); kf.lat += K * (lat - kf.lat);
+  kf.v = (1 - K) * kf.v; kf.t = ts;
+  return { lng: kf.lng, lat: kf.lat, acc: Math.sqrt(kf.v) };
+}
+// 계수 k인 화살표 하나 (게임의 smoothBearing과 같은 식, 0.6 자리에 k)
+function makeAim(k) {
+  return { k, x: 0, y: 0, angle: null,
+    step(b) { const r = b * D2R; this.x = this.x * k + Math.sin(r) * (1 - k); this.y = this.y * k + Math.cos(r) * (1 - k);
+      this.angle = (Math.atan2(this.x, this.y) / D2R + 360) % 360; return this.angle; } };
+}
+const angDiff = (a, b) => { const d = Math.abs(((a - b) % 360 + 360) % 360); return d > 180 ? 360 - d : d; };
+const signedDiff = (a, b) => ((a - b + 540) % 360) - 180;
+
+// ===== 상태 =====
+let me = null, gpsMe = null, target = null, manualMode = false, pickMe = false, stableT = 0;
+const aims = KS.map(makeAim);
+let react = null;          // 진행 중인 반응 속도 측정
+let reactN = 0, jitterN = 0;
+let jitter = null;         // 진행 중인 떨림 측정
+const log = [];
+
+// ===== 화면 =====
+$('#dials').innerHTML = KS.map((k, i) => `
+  <div class="dial">
+    <svg viewBox="0 0 100 100">
+      <circle cx="50" cy="50" r="44" fill="none" stroke="#2a2f3a" stroke-width="2"/>
+      <text x="50" y="13" text-anchor="middle" font-size="9" fill="#8a91a3">N</text>
+      <line id="raw${i}" x1="50" y1="50" x2="50" y2="10" stroke="var(--raw)" stroke-width="1.5" stroke-dasharray="3 3" opacity="0"/>
+      <g id="arr${i}" opacity="0"><path d="M50 10 L60 30 L50 25 L40 30 Z" fill="${COLORS[i]}"/><line x1="50" y1="25" x2="50" y2="62" stroke="${COLORS[i]}" stroke-width="4" stroke-linecap="round"/></g>
+    </svg>
+    <div class="k" style="color:${COLORS[i]}">k = ${k}</div>
+    <div class="deg" id="deg${i}">–</div>
+    <div class="res" id="res${i}"></div>
+  </div>`).join('');
+
+const map = new maplibregl.Map({ container: 'map', style: 'https://tiles.openfreemap.org/styles/liberty', center: [129.145, 35.157], zoom: 15, attributionControl: { compact: true } });
+map.dragRotate.disable(); map.touchZoomRotate.disableRotation();
+const meMarker = new maplibregl.Marker({ color: '#4dabf7' });
+const tgMarker = new maplibregl.Marker({ color: '#ff4d4d' });
+map.on('load', () => {
+  map.addSource('ln', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({ id: 'ln', type: 'line', source: 'ln', paint: { 'line-color': '#ff4d4d', 'line-width': 2, 'line-dasharray': [2, 2] } });
+});
+function drawLine() {
+  const s = map.getSource('ln'); if (!s) return;
+  s.setData(me && target ? { type: 'Feature', geometry: { type: 'LineString', coordinates: [[me.lng, me.lat], [target.lng, target.lat]] } } : { type: 'FeatureCollection', features: [] });
+}
+
+map.on('click', e => {
+  const p = { lng: e.lngLat.lng, lat: e.lngLat.lat };
+  if (pickMe) { pickMe = false; me = p; meMarker.setLngLat([p.lng, p.lat]).addTo(map); drawLine(); setStatus('내 위치를 찍었어요. 이제 탭하면 <b>목표</b>가 바뀌어요.'); return; }
+  setTarget(p);
+});
+function setTarget(p) {
+  const before = (me && target) ? brg(me, target) : null;
+  stableT = 0;
+  target = p; tgMarker.setLngLat([p.lng, p.lat]).addTo(map); drawLine();
+  // 화살표가 이미 방향을 갖고 있을 때만 반응 속도 측정 시작
+  if (me && before != null && aims[0].angle != null) {
+    const after = brg(me, p);
+    react = { n: ++reactN, turn: angDiff(after, before), t: 0, done: [null, null, null] };
+    KS.forEach((_, i) => $('#res' + i).textContent = '측정 중…');
+    renderReact();
+  }
+}
+
+$('#modeBtn').onclick = () => {
+  manualMode = !manualMode; pickMe = manualMode;
+  $('#modeBtn').textContent = manualMode ? '✋ 내 위치: 직접 지정' : '📍 내 위치: GPS';
+  $('#modeBtn').classList.toggle('on', manualMode);
+  if (!manualMode && gpsMe) { me = gpsMe; meMarker.setLngLat([me.lng, me.lat]).addTo(map); drawLine(); }
+  if (manualMode) setStatus('다음 한 번 탭하는 곳이 <b>내 위치</b>가 돼요. 그다음 탭부터는 목표가 바뀌어요.');
+};
+
+if (navigator.geolocation) {
+  let first = true;
+  navigator.geolocation.watchPosition(pos => {
+    const f = filterFix(pos.coords.longitude, pos.coords.latitude, pos.coords.accuracy, pos.timestamp);
+    if (!f) return;
+    gpsMe = f;
+    if (!manualMode) { me = f; meMarker.setLngLat([f.lng, f.lat]).addTo(map); drawLine(); }
+    if (first) { first = false; map.jumpTo({ center: [f.lng, f.lat], zoom: 17 }); }
+  }, err => setStatus('위치를 못 받았어요: ' + err.message + ' — "내 위치: 직접 지정"으로 바꿔서 시험할 수 있어요.'),
+  { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 });
+} else setStatus('이 브라우저는 위치 기능이 없어요. "내 위치: 직접 지정"을 써주세요.');
+
+function setStatus(h) { $('#status').innerHTML = h; }
+
+// ===== 1초마다 갱신 (게임과 같은 주기) =====
+setInterval(() => {
+  if (!me || !target) { if (me && !target) setStatus('지도를 탭해서 <b>목표</b>를 찍어주세요.'); return; }
+  const raw = brg(me, target), d = dist(me, target);
+  stableT++;
+  aims.forEach((a, i) => {
+    const ang = a.step(raw);
+    $('#arr' + i).setAttribute('transform', `rotate(${ang} 50 50)`); $('#arr' + i).setAttribute('opacity', '1');
+    $('#raw' + i).setAttribute('transform', `rotate(${raw} 50 50)`); $('#raw' + i).setAttribute('opacity', '.7');
+    $('#deg' + i).textContent = `${ang.toFixed(1)}° (차이 ${angDiff(ang, raw).toFixed(1)}°)`;
+  });
+  const acc = gpsMe && !manualMode ? ` · GPS 오차 ±${Math.round(gpsMe.acc)}m` : '';
+  setStatus(`목표 방향 <b>${raw.toFixed(1)}°</b> · 거리 <b>${Math.round(d)}m</b>${acc}${d < 25 ? ' · ⚠️ 너무 가까우면 GPS 오차로 방향이 크게 흔들려요' : ''}<br>목표 고정 후 <b>${stableT}초</b>${react ? '' : (stableT >= 45 ? ' · ✅ 다음 측정 준비 완료' : ' · 45초 이상 기다린 뒤 목표를 바꿔야 예측과 비교할 수 있어요')}`);
+
+  if (react) {
+    react.t++;
+    aims.forEach((a, i) => { if (react.done[i] == null && angDiff(a.angle, raw) <= 10) { react.done[i] = react.t; $('#res' + i).textContent = `✅ ${react.t}초`; } });
+    if (react.done.every(v => v != null) || react.t >= 120) {
+      log.push(`반응속도 #${react.n} (꺾인 각도 ${react.turn.toFixed(0)}°): ` + KS.map((k, i) => `k=${k} ${react.done[i] ?? '120초 넘음'}초`).join(', '));
+      react = null;
+    }
+    renderReact();
+  }
+  if (jitter) {
+    jitter.raw.push(raw); aims.forEach((a, i) => jitter.s[i].push(a.angle));
+    jitter.left--;
+    $('#jitterBtn').textContent = `〰️ 측정 중… ${jitter.left}초`;
+    if (jitter.left <= 0) finishJitter();
+  }
+}, 1000);
+
+let reactRows = [];
+function renderReact() {
+  if (react) { reactRows = reactRows.filter(r => r.n !== react.n); reactRows.push({ ...react, done: [...react.done], live: true }); }
+  else reactRows = reactRows.map(r => ({ ...r, live: false }));
+  $('#reactBody').innerHTML = reactRows.map(r => `<tr><td>${r.n}</td><td>${r.turn.toFixed(0)}°</td>${r.done.map(v => `<td>${v != null ? v + '초' : (r.live ? '…' : '120+')}</td>`).join('')}</tr>`).join('');
+}
+
+// ===== 떨림 측정 =====
+$('#jitterBtn').onclick = () => {
+  if (!me || !target) return setStatus('먼저 내 위치와 목표가 있어야 해요.');
+  if (jitter) return;
+  jitter = { n: ++jitterN, left: 60, raw: [], s: [[], [], []] };
+  $('#jitterBtn').disabled = true;
+};
+function spread(arr) {
+  // 원 위의 평균 방향을 구하고(단위원 벡터 평균), 그 방향에서 얼마나 벗어났는지
+  let sx = 0, sy = 0; arr.forEach(a => { sx += Math.sin(a * D2R); sy += Math.cos(a * D2R); });
+  const mean = (Math.atan2(sx, sy) / D2R + 360) % 360;
+  const devs = arr.map(a => signedDiff(a, mean));
+  return { range: Math.max(...devs) - Math.min(...devs), avg: devs.reduce((s, v) => s + Math.abs(v), 0) / devs.length };
+}
+function finishJitter() {
+  const skip = 10; // 처음 10초는 화살표가 자리 잡는 시간이라 제외
+  const r = spread(jitter.raw.slice(skip)), s = jitter.s.map(a => spread(a.slice(skip)));
+  const cell = x => `<td>폭 ${x.range.toFixed(1)}°<br><small>평균 ${x.avg.toFixed(1)}°</small></td>`;
+  $('#jitterBody').insertAdjacentHTML('beforeend', `<tr><td>${jitter.n}</td>${cell(r)}${s.map(cell).join('')}</tr>`);
+  log.push(`떨림 #${jitter.n} (50초, 흔들린 폭 / 평균 벗어남): GPS 원래값 ${r.range.toFixed(1)}°/${r.avg.toFixed(1)}°, ` + KS.map((k, i) => `k=${k} ${s[i].range.toFixed(1)}°/${s[i].avg.toFixed(1)}°`).join(', '));
+  jitter = null;
+  $('#jitterBtn').disabled = false; $('#jitterBtn').textContent = '〰️ 떨림 측정 60초';
+}
+
+$('#copyBtn').onclick = async () => {
+  const text = log.length ? log.join('\n') : '아직 기록이 없어요';
+  try { await navigator.clipboard.writeText(text); $('#copyBtn').textContent = '✅ 복사됨'; }
+  catch (e) { prompt('아래 내용을 복사하세요', text); }
+  setTimeout(() => $('#copyBtn').textContent = '📋 기록 복사', 1500);
+};
+</script>
+</body>
+</html>
