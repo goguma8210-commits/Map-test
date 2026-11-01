@@ -53,7 +53,7 @@
   <p class="hint">
     지도를 탭하면 목표가 바뀌어요. 계산은 MANHUNT와 같은 식(1초마다 갱신, 단위원 벡터 평균, 같은 GPS 필터)을 써요.<br>
     반응 속도: 목표를 찍고 45초 이상 기다려 화살표가 완전히 자리 잡으면, 목표를 내 기준 90° 옆으로 옮겨 찍어요. 예측은 0.3 → 2초, 0.6 → 4초, 0.9 → 18초.<br>
-    떨림: 목표를 30m 이상 떨어진 곳에 찍고, 가만히 서서 측정 버튼을 눌러요. 실내에선 "내 위치: 직접 지정"으로 바꾸면 GPS 없이 반응 속도만 시험할 수 있어요.
+    떨림: 밖에서 GPS 모드로, 목표를 30m 이상 떨어진 곳에 찍고 45초 기다린 뒤 측정 버튼을 눌러요. 측정하는 60초 동안은 목표를 건드리지 말고 가만히 서 있어요. 실내에선 "내 위치: 직접 지정"으로 바꾸면 GPS 없이 반응 속도만 시험할 수 있어요.
   </p>
 </div>
 
@@ -141,6 +141,7 @@ map.on('click', e => {
 function setTarget(p) {
   const before = (me && target) ? brg(me, target) : null;
   stableT = 0;
+  if (jitter) { jitter = null; $('#jitterBtn').disabled = false; $('#jitterBtn').textContent = '〰️ 떨림 측정 60초'; setTimeout(() => setStatus('⚠️ 떨림 측정 중에 목표가 바뀌어서 측정을 취소했어요. 목표를 고정한 채로 다시 해주세요.'), 0); }
   target = p; tgMarker.setLngLat([p.lng, p.lat]).addTo(map); drawLine();
   // 화살표가 이미 방향을 갖고 있을 때만 반응 속도 측정 시작
   if (me && before != null && aims[0].angle != null) {
@@ -215,6 +216,8 @@ function renderReact() {
 $('#jitterBtn').onclick = () => {
   if (!me || !target) return setStatus('먼저 내 위치와 목표가 있어야 해요.');
   if (jitter) return;
+  if (manualMode) return setStatus('⚠️ "내 위치: 직접 지정" 모드에선 GPS 흔들림이 없어서 항상 0°가 나와요. GPS 모드로 바꿔서 밖에서 재주세요.');
+  if (stableT < 45) return setStatus(`⚠️ 목표를 고정하고 45초가 지나야 측정할 수 있어요. (지금 ${stableT}초)`);
   jitter = { n: ++jitterN, left: 60, raw: [], s: [[], [], []] };
   $('#jitterBtn').disabled = true;
 };
